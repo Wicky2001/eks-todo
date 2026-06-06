@@ -1,0 +1,14 @@
+{
+  "name": "eks-todo",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "backend",
+    "mongoose"
+  ],
+  "scripts": {
+    "frontend": "npm run dev --workspace frontend",
+    "backend": "npm run dev --workspace backend",
+    "migrate": "npm run migrate --workspace mongoose"
+  }
+}
