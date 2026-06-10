@@ -517,7 +517,7 @@ resource "kubectl_manifest" "karpenter_example_deployment" {
     metadata:
       name: inflate
     spec:
-      replicas: 10
+      replicas: 0
       selector:
         matchLabels:
           app: inflate
@@ -539,3 +539,109 @@ resource "kubectl_manifest" "karpenter_example_deployment" {
     helm_release.karpenter
   ]
 }
+
+
+###############################################################################
+# ecr repository for custom app images
+###############################################################################
+
+resource "aws_ecr_repository" "frontend" {
+  name         = "${var.project_name}-frontend"
+  force_delete = true
+}
+
+resource "aws_ecr_repository" "backend" {
+  name         = "${var.project_name}-backend"
+  force_delete = true
+}
+
+resource "aws_ecr_repository" "migration" {
+  name         = "${var.project_name}-migration"
+  force_delete = true
+}
+
+
+###############################################################################
+# DocumentDB Cluster Configuration
+###############################################################################
+module "documentdb_cluster" {
+  source  = "cloudposse/documentdb-cluster/aws"
+  version = "1.1.0" # Pinning to a stable version
+
+  namespace       = "eks-todo"
+  stage           = "testing"
+  name            = "eks-todo-docdb"
+  cluster_size    = 1
+  master_username = var.master_username
+  master_password = var.master_password
+  instance_class  = "db.t3.medium"
+  vpc_id          = module.vpc.vpc_id
+  subnet_ids      = module.vpc.private_subnets
+
+
+
+  allowed_security_groups = [aws_security_group.backend_pod_sg.id]
+
+}
+
+
+###############################################################################
+# 1. Create a Security Group specifically for the Backend Pod
+###############################################################################
+resource "aws_security_group" "backend_pod_sg" {
+  name        = "${var.cluster_name}-backend-pod-sg"
+  description = "Security Group assigned directly to backend pods"
+  vpc_id      = module.vpc.vpc_id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.cluster_name}-backend-pod-sg"
+  }
+}
+
+
+
+
+
+
+###############################################################################
+# 2. Allow the Backend Pod SG to talk to the DocumentDB SG
+###############################################################################
+resource "aws_security_group_rule" "allow_backend_to_docdb" {
+  type                     = "ingress"
+  from_port                = 27017 # Default DocumentDB MongoDB port
+  to_port                  = 27017
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.backend_pod_sg.id
+  security_group_id        = module.documentdb_cluster.security_group_id
+}
+
+
+
+###############################################################################
+# 3. Tell Kubernetes to dynamically apply this SG whenever our backend spins up
+###############################################################################
+resource "kubectl_manifest" "backend_network_policy" {
+  yaml_body = <<-YAML
+    apiVersion: vpcresources.k8s.aws/v1beta1
+    kind: SecurityGroupPolicy
+    metadata:
+      name: backend-db-access
+      namespace: default
+    spec:
+      podSelector:
+        matchLabels:
+          app: backend
+      securityGroups:
+        groupIds:
+          - ${aws_security_group.backend_pod_sg.id}
+  YAML
+}
+
+

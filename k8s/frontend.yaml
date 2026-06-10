@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+spec:
+  selector:
+    app: frontend # select the users pod and expose
+  type: ClusterIP
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend # label by which pod can be selected
+    spec:
+      containers:
+        - name: frontend-container
+          ports:
+            - containerPort: 8080
+          image: 915658834610.dkr.ecr.ap-south-1.amazonaws.com/jawsight/frontend:v4
+          imagePullPolicy: Always
