@@ -3,7 +3,7 @@
 ###############################################################################
 terraform {
   backend "s3" {
-    bucket = "XXXXXXXXXXXX-bucket-state-file-karpenter"
+    bucket = "${var.aws_account_id}-bucket-state-file-karpenter"
     region = "ap-southeast-2"
     key    = "karpenter.tfstate"
   }
@@ -16,11 +16,11 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "~> 6.0"
     }
     helm = {
       source  = "hashicorp/helm"
-      version = "~> 2.0"
+      version = "~> 3.0"
     }
     kubectl = {
       source  = "gavinbunney/kubectl"
@@ -31,13 +31,15 @@ terraform {
 
 
 provider "aws" {
-    region              = var.region
-    allowed_account_ids = [var.aws_account_id]
+  region              = var.region
+  allowed_account_ids = [var.aws_account_id]
+  profile             = var.aws_profile
 }
 
 provider "aws" {
-    region = "us-east-1"
-    alias  = "virginia"
+  region  = "us-east-1"
+  alias   = "virginia"
+  profile = var.aws_profile
 }
 
 /*
@@ -45,7 +47,7 @@ Teach helm how to log in to the EKS cluster
 */
 provider "helm" {
   kubernetes = {
-    host                   = module.eks.cluster_endpoint
+    host = module.eks.cluster_endpoint
     #This is the digital ID card of your cluster. It ensures Terraform is talking to your real cluster and not an imposter.
     cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
 
@@ -103,7 +105,7 @@ data "aws_ecrpublic_authorization_token" "token" {
 ###############################################################################
 module "vpc" {
   # The source code location for the official AWS VPC module
-  source  = "terraform-aws-modules/vpc/aws"
+  source = "terraform-aws-modules/vpc/aws"
   # The specific version of the module to ensure consistent deployments
   version = "5.13.0"
 
@@ -113,24 +115,24 @@ module "vpc" {
   cidr = "10.0.0.0/16"
 
   # The three physical AWS data centers (Availability Zones) to distribute your resources across
-  azs             = ["${var.region}a", "${var.region}b", "${var.region}c"]
-  
+  azs = ["${var.region}a", "${var.region}b", "${var.region}c"]
+
   # Private subnets: The "inside of the house." Instances here cannot be reached from the internet, 
   # but they can "look out the window" to download updates via a NAT Gateway.
   private_subnets = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
-  
+
   # Public subnets: The "front yard." Instances here have direct access to the public internet, 
   # typically used for public-facing entry points.
-  public_subnets  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
-  
+  public_subnets = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
+
   # Intra subnets: The "sealed safe room." These have zero access to the outside internet, 
   # not even for updates. EKS needs these to securely house the network cables (ENIs) 
   # that connect the Kubernetes 'brain' (Control Plane) to your worker nodes, 
   # ensuring that no external traffic can ever reach the control plane infrastructure.
-  intra_subnets   = ["10.0.104.0/24", "10.0.105.0/24", "10.0.106.0/24"]
+  intra_subnets = ["10.0.104.0/24", "10.0.105.0/24", "10.0.106.0/24"]
 
   # Enable the NAT Gateway so private instances can reach out to the internet for updates
-  enable_nat_gateway     = true
+  enable_nat_gateway = true
   # Use only one NAT Gateway to save costs (instead of one per AZ)
   single_nat_gateway     = true
   one_nat_gateway_per_az = false
@@ -149,7 +151,7 @@ module "vpc" {
     # internal-only, private load balancer (e.g., for frontend-to-database traffic), put it here.'
     # Like the public tag, the value '1' is a strict requirement for the AWS Load Balancer Controller.
     "kubernetes.io/role/internal-elb" = 1
-    
+
     # This is the 'discovery' tag for Karpenter. Karpenter is the engine that builds your EC2 worker nodes. 
     # When it needs to launch a new node, it asks AWS: 'Give me subnets with this tag.' Because we only 
     # place this tag on private subnets, Karpenter will automatically and securely launch your 
@@ -163,18 +165,31 @@ module "vpc" {
 ###############################################################################
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
-  version = "20.33.1"
+  version = "21.23.0"
 
-  cluster_name    = var.cluster_name
-  cluster_version = "1.30"
+  name               = var.cluster_name
+  kubernetes_version = "1.33"
 
-  cluster_endpoint_public_access  = true
+  endpoint_public_access = true
+  # Cluster access entry
+  # To add the current caller identity as an administrator
+  enable_cluster_creator_admin_permissions = true
 
-  cluster_addons = {
-    coredns                = {}
-    eks-pod-identity-agent = {}
-    kube-proxy             = {}
-    vpc-cni                = {}
+
+  compute_config = {
+    enabled = false
+  }
+
+
+  addons = {
+    coredns = {}
+    eks-pod-identity-agent = {
+      before_compute = true
+    }
+    kube-proxy = {}
+    vpc-cni = {
+      before_compute = true
+    }
   }
 
   vpc_id                   = module.vpc.vpc_id
@@ -190,7 +205,7 @@ module "eks" {
       min_size     = 2
       max_size     = 10
       desired_size = 2
-      
+
       taints = {
         # This Taint aims to keep just EKS Addons and Karpenter running on this MNG
         # The pods that do not tolerate this taint should run on nodes created by Karpenter
@@ -203,12 +218,10 @@ module "eks" {
     }
   }
 
-  # Cluster access entry
-  # To add the current caller identity as an administrator
-  enable_cluster_creator_admin_permissions = true
+
 
   node_security_group_tags = {
-  /*
+    /*
 
   1. What does this tag do?
 Earlier, we talked about how Karpenter uses the "karpenter.sh/discovery" tag on subnets to act as a neon sign, telling Karpenter: "It is safe to launch EC2 instances in this network."
@@ -240,14 +253,13 @@ The Security Risk: Imagine you have a highly permissive security group open to t
 # Karpenter submodule
 ###############################################################################
 module "karpenter" {
-  source = "terraform-aws-modules/eks/aws//modules/karpenter"
-  version = "20.33.1"
+  source  = "terraform-aws-modules/eks/aws//modules/karpenter"
+  version = "21.23.0"
 
   cluster_name = module.eks.cluster_name
 
-  enable_v1_permissions = true
 
-  enable_pod_identity             = true
+
   create_pod_identity_association = true
 
   # Attach additional IAM policies to the Karpenter node IAM role
@@ -266,7 +278,7 @@ resource "helm_release" "karpenter" {
   repository_username = data.aws_ecrpublic_authorization_token.token.user_name
   repository_password = data.aws_ecrpublic_authorization_token.token.password
   chart               = "karpenter"
-  version             = "1.0.0"
+  version             = "1.12.1"
   wait                = false
 
   values = [
