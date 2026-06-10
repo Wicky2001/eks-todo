@@ -18,3 +18,7 @@ terraform.tfstate.backup
 .terraform/
 terraform.tfvars
 *.tfvars
+
+secret.yml
+
+
