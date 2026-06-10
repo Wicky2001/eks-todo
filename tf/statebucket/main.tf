@@ -20,7 +20,7 @@ terraform {
 # S3 Bucket
 ###############################################################################
 resource "aws_s3_bucket" "state" {
-  bucket        = "${var.aws_account_id}-bucket-state-file-karpenter"
+  bucket        = "terraform-backend-state-file-karpenter"
   force_destroy = true
 
 }

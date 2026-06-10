@@ -1,10 +1,13 @@
+
+
+
 ###############################################################################
 # Provider
 ###############################################################################
 terraform {
   backend "s3" {
-    bucket = "${var.aws_account_id}-bucket-state-file-karpenter"
-    region = "ap-southeast-2"
+    bucket = "terraform-backend-state-file-karpenter"
+    region = "ap-south-1"
     key    = "karpenter.tfstate"
   }
 
@@ -42,6 +45,29 @@ provider "aws" {
   profile = var.aws_profile
 }
 
+
+###############################################################################
+# Data Sources
+###############################################################################
+/* AUTHENTICATION NOTE: 
+  We keep the 'aws_ecrpublic_authorization_token' data source even though the 
+  Karpenter repo is public. 
+
+  WHY? 
+  AWS enforces strict anonymous rate limits on Public ECR. If we don't provide 
+  an authentication token, AWS identifies us by our IP address. If we run 
+  'terraform apply' multiple times (or run this in a shared CI/CD pipeline), 
+  AWS will eventually block us with a '429 Too Many Requests' error.
+
+  Providing the token tells AWS we are a registered customer, which lifts 
+  these limits and ensures our deployment remains 100% reliable.
+*/
+data "aws_ecrpublic_authorization_token" "token" {
+  provider = aws.virginia
+}
+
+
+
 /*
 Teach helm how to log in to the EKS cluster
 */
@@ -65,6 +91,12 @@ provider "helm" {
       args = ["eks", "get-token", "--cluster-name", module.eks.cluster_name]
     }
   }
+
+  # registries = [{
+  #   url      = "oci://public.ecr.aws"
+  #   username = data.aws_ecrpublic_authorization_token.token.user_name
+  #   password = data.aws_ecrpublic_authorization_token.token.password
+  # }]
 }
 
 
@@ -93,12 +125,6 @@ provider "kubectl" {
 
 
 
-###############################################################################
-# Data Sources
-###############################################################################
-data "aws_ecrpublic_authorization_token" "token" {
-  provider = aws.virginia
-}
 
 ###############################################################################
 # VPC
@@ -107,7 +133,7 @@ module "vpc" {
   # The source code location for the official AWS VPC module
   source = "terraform-aws-modules/vpc/aws"
   # The specific version of the module to ensure consistent deployments
-  version = "5.13.0"
+  version = "6.6.1"
 
   # Name used to identify this VPC in the AWS console
   name = "${var.cluster_name}-vpc"
@@ -176,6 +202,8 @@ module "eks" {
   enable_cluster_creator_admin_permissions = true
 
 
+
+
   compute_config = {
     enabled = false
   }
@@ -187,8 +215,16 @@ module "eks" {
       before_compute = true
     }
     kube-proxy = {}
+
     vpc-cni = {
       before_compute = true
+      configuration_values = jsonencode({
+        env = {
+          # This enables the trick to allow more pods on tiny free-tier servers
+          ENABLE_PREFIX_DELEGATION = "true"
+          WARM_PREFIX_TARGET       = "1"
+        }
+      })
     }
   }
 
@@ -200,7 +236,7 @@ module "eks" {
     karpenter = {
       # Starting on 1.30, AL2023 is the default AMI type for EKS managed node groups
       ami_type       = "AL2023_x86_64_STANDARD"
-      instance_types = ["m5.large"]
+      instance_types = ["t3.micro"]
 
       min_size     = 2
       max_size     = 10
@@ -217,6 +253,9 @@ module "eks" {
       }
     }
   }
+
+
+
 
 
 
@@ -249,6 +288,9 @@ The Security Risk: Imagine you have a highly permissive security group open to t
   }
 }
 
+
+
+
 ###############################################################################
 # Karpenter submodule
 ###############################################################################
@@ -257,8 +299,6 @@ module "karpenter" {
   version = "21.23.0"
 
   cluster_name = module.eks.cluster_name
-
-
 
   create_pod_identity_association = true
 
@@ -272,14 +312,28 @@ module "karpenter" {
 # Install Karpenter via helm
 ###############################################################################
 resource "helm_release" "karpenter" {
-  namespace           = "kube-system"
-  name                = "karpenter"
-  repository          = "oci://public.ecr.aws/karpenter"
-  repository_username = data.aws_ecrpublic_authorization_token.token.user_name
-  repository_password = data.aws_ecrpublic_authorization_token.token.password
-  chart               = "karpenter"
-  version             = "1.12.1"
-  wait                = false
+  namespace  = "kube-system"
+  name       = "karpenter"
+  repository = "oci://public.ecr.aws/karpenter"
+  chart      = "karpenter"
+  version    = "1.12.1"
+
+  /*
+    Why `wait = false` for Karpenter?
+
+    By default, the Helm provider waits until all Kubernetes resources
+    are fully deployed and healthy before Terraform continues.
+
+    For Karpenter, this can sometimes cause installation deadlocks because
+    the controller needs to register and initialize its admission webhooks
+    before it can become fully ready. If Terraform waits for complete
+    readiness, the Helm release may time out and fail.
+
+    Setting `wait = false` allows Terraform to submit the Helm chart to
+    Kubernetes and continue immediately, letting Karpenter finish its
+    startup process asynchronously in the background.
+*/
+  wait = false
 
   values = [
     <<-EOT
@@ -293,12 +347,42 @@ resource "helm_release" "karpenter" {
   ]
 }
 
+
+###############################################################################
+# Install Metrics Server via Raw Helm
+###############################################################################
+resource "helm_release" "metrics_server" {
+  name       = "metrics-server"
+  namespace  = "kube-system"
+  repository = "https://kubernetes-sigs.github.io/metrics-server/"
+  chart      = "metrics-server"
+  version    = "3.12.1"
+
+  # wait = false stops Terraform from freezing if the cluster is busy
+  wait = false
+
+  # We pass the custom settings directly to the app here
+  values = [
+    <<-EOT
+    # 1. The VIP Key to let it sit on your reserved t3.small nodes
+    tolerations:
+      - key: "CriticalAddonsOnly"
+        operator: "Exists"
+        effect: "NoSchedule"
+        
+    # 2. Stops it from crashing due to AWS self-signed security certificates
+    args:
+      - --kubelet-insecure-tls
+    EOT
+  ]
+}
+
 ###############################################################################
 # Apply Karpenter NodePool YAML via kubectl provider
 ###############################################################################
 resource "kubectl_manifest" "karpenter_node_pool" {
   yaml_body = <<-YAML
-    apiVersion: karpenter.sh/v1beta1
+    apiVersion: karpenter.sh/v1
     kind: NodePool
     metadata:
       name: default
@@ -306,19 +390,45 @@ resource "kubectl_manifest" "karpenter_node_pool" {
       template:
         spec:
           nodeClassRef:
+            group: karpenter.k8s.aws
+            kind: EC2NodeClass
             name: default
           requirements:
             - key: "karpenter.k8s.aws/instance-category"
               operator: In
-              values: ["c", "m", "r"]
+              /*
+              What it means: This selects the overall architectural "family" or purpose of the server.
+
+              In simple terms: You are telling Karpenter: "Only buy a Burstable (t) family server." * Why we do it: AWS has heavy-duty 
+              families like c (Compute/Heavy processing) or r (RAM/Databases) which cost a fortune. The t family (like t2 or t3) is the budget-friendly, 
+              burstable family. This is the only family that qualifies for the AWS Free Tier.
+              
+              */
+              values: ["t"] # Correct! "t" is the burstable/cheap family
+
             - key: "karpenter.k8s.aws/instance-cpu"
               operator: In
-              values: ["4", "8", "16", "32"]
-            - key: "karpenter.k8s.aws/instance-hypervisor"
-              operator: In
-              values: ["nitro"]
+              /*
+              What it means: This filters how many virtual processing cores (vCPUs) the server is allowed to have.
+
+              In simple terms: You are telling Karpenter: "Only fetch a server that has exactly 1 or 2 CPU cores."
+
+              Why we do it: Free Tier instances are tiny. A t2.micro or t3.micro only has 2 vCPUs. If Karpenter sees 
+              a massive t3.2xlarge (which has 8 CPUs), it might try to deploy it to fit your workloads. Limiting this to 
+              ["1", "2"] forces Karpenter to stick strictly to the smallest, cheapest options.
+              */
+              values: ["1", "2"] 
+
             - key: "karpenter.k8s.aws/instance-generation"
-              operator: Gt
+               /*
+
+                  What it means: This filters how old or new the hardware model architecture is. AWS numbers its hardware iterations over time.
+
+                  In simple terms: You are telling Karpenter: "I want a hardware model generation that is Greater than or Equal to (Gte) Generation 
+                  2." This tells Karpenter it is allowed to pick Generation 2, Generation 3, Generation 4, and so on.
+  
+              */
+              operator: Gte
               values: ["2"]
       limits:
         cpu: 1000
@@ -338,13 +448,15 @@ resource "kubectl_manifest" "karpenter_node_pool" {
 ###############################################################################
 resource "kubectl_manifest" "karpenter_node_class" {
   yaml_body = <<-YAML
-    apiVersion: karpenter.k8s.aws/v1beta1
+    apiVersion: karpenter.k8s.aws/v1
     kind: EC2NodeClass
     metadata:
       name: default
     spec:
       amiFamily: AL2023
       role: ${module.karpenter.node_iam_role_name}
+      amiSelectorTerms:
+        - alias: al2023@latest
       subnetSelectorTerms:
         - tags:
             karpenter.sh/discovery: ${module.eks.cluster_name}
@@ -354,6 +466,9 @@ resource "kubectl_manifest" "karpenter_node_class" {
       tags:
         karpenter.sh/discovery: ${module.eks.cluster_name}
   YAML
+
+
+
 
   depends_on = [
     helm_release.karpenter
