@@ -377,9 +377,6 @@ resource "helm_release" "metrics_server" {
   ]
 }
 
-###############################################################################
-# Apply Karpenter NodePool YAML via kubectl provider
-###############################################################################
 resource "kubectl_manifest" "karpenter_node_pool" {
   yaml_body = <<-YAML
     apiVersion: karpenter.sh/v1
@@ -393,48 +390,83 @@ resource "kubectl_manifest" "karpenter_node_pool" {
             group: karpenter.k8s.aws
             kind: EC2NodeClass
             name: default
+
           requirements:
+            # ------------------------------------------------------------------
+            # INSTANCE CATEGORY FILTER
+            # ------------------------------------------------------------------
+            # This selects the "family" of EC2 instances.
+            # Example families: t (burstable), c (compute), r (memory)
+            #
+            # We use "t" because:
+            # - It is burstable (cheap)
+            # - Good for dev / low-cost workloads
+            # - Often eligible for Free Tier
+            #
+            # IMPORTANT: This does NOT mean "only t2 or t3"
+            # It means ANY instance family starting with "t"
+            # ------------------------------------------------------------------
             - key: "karpenter.k8s.aws/instance-category"
               operator: In
-              /*
-              What it means: This selects the overall architectural "family" or purpose of the server.
+              values: ["t"]
 
-              In simple terms: You are telling Karpenter: "Only buy a Burstable (t) family server." * Why we do it: AWS has heavy-duty 
-              families like c (Compute/Heavy processing) or r (RAM/Databases) which cost a fortune. The t family (like t2 or t3) is the budget-friendly, 
-              burstable family. This is the only family that qualifies for the AWS Free Tier.
-              
-              */
-              values: ["t"] # Correct! "t" is the burstable/cheap family
-
+            # ------------------------------------------------------------------
+            # INSTANCE CPU FILTER
+            # ------------------------------------------------------------------
+            # Controls how many vCPUs the instance can have
+            #
+            # We restrict it to small sizes:
+            # - 1 vCPU (very small)
+            # - 2 vCPU (micro / small instances)
+            #
+            # Why:
+            # Prevent Karpenter from choosing large expensive instances
+            # like t3.large, t3.xlarge, etc.
+            # ------------------------------------------------------------------
             - key: "karpenter.k8s.aws/instance-cpu"
               operator: In
-              /*
-              What it means: This filters how many virtual processing cores (vCPUs) the server is allowed to have.
+              values: ["1", "2"]
 
-              In simple terms: You are telling Karpenter: "Only fetch a server that has exactly 1 or 2 CPU cores."
-
-              Why we do it: Free Tier instances are tiny. A t2.micro or t3.micro only has 2 vCPUs. If Karpenter sees 
-              a massive t3.2xlarge (which has 8 CPUs), it might try to deploy it to fit your workloads. Limiting this to 
-              ["1", "2"] forces Karpenter to stick strictly to the smallest, cheapest options.
-              */
-              values: ["1", "2"] 
-
+            # ------------------------------------------------------------------
+            # INSTANCE GENERATION FILTER
+            # ------------------------------------------------------------------
+            # Controls how new the hardware generation must be
+            #
+            # Gte "2" means:
+            # - Allow generation 2 and above
+            # - Reject very old instance families (gen 1)
+            #
+            # Why:
+            # - Better performance
+            # - Better efficiency
+            # - Avoid outdated hardware
+            # ------------------------------------------------------------------
             - key: "karpenter.k8s.aws/instance-generation"
-               /*
-
-                  What it means: This filters how old or new the hardware model architecture is. AWS numbers its hardware iterations over time.
-
-                  In simple terms: You are telling Karpenter: "I want a hardware model generation that is Greater than or Equal to (Gte) Generation 
-                  2." This tells Karpenter it is allowed to pick Generation 2, Generation 3, Generation 4, and so on.
-  
-              */
               operator: Gte
               values: ["2"]
+
+      # ----------------------------------------------------------------------
+      # NODE CAPACITY LIMIT
+      # ----------------------------------------------------------------------
+      # Maximum CPU Karpenter is allowed to provision in total
+      # (cluster-wide for this NodePool)
+      # ----------------------------------------------------------------------
       limits:
         cpu: 1000
+
+      # ----------------------------------------------------------------------
+      # DISRUPTION SETTINGS (NODE CONSOLIDATION)
+      # ----------------------------------------------------------------------
+      # WhenEmpty:
+      # - Removes nodes only when they have no pods
+      #
+      # consolidateAfter: 30s
+      # - Waits 30 seconds before consolidating nodes
+      # ----------------------------------------------------------------------
       disruption:
         consolidationPolicy: WhenEmpty
         consolidateAfter: 30s
+
   YAML
 
   depends_on = [
@@ -478,32 +510,32 @@ resource "kubectl_manifest" "karpenter_node_class" {
 ###############################################################################
 # Inflate deployment
 ###############################################################################
-# resource "kubectl_manifest" "karpenter_example_deployment" {
-#   yaml_body = <<-YAML
-#     apiVersion: apps/v1
-#     kind: Deployment
-#     metadata:
-#       name: inflate
-#     spec:
-#       replicas: 0
-#       selector:
-#         matchLabels:
-#           app: inflate
-#       template:
-#         metadata:
-#           labels:
-#             app: inflate
-#         spec:
-#           terminationGracePeriodSeconds: 0
-#           containers:
-#             - name: inflate
-#               image: public.ecr.aws/eks-distro/kubernetes/pause:3.7
-#               resources:
-#                 requests:
-#                   cpu: 1
-#   YAML
+resource "kubectl_manifest" "karpenter_example_deployment" {
+  yaml_body = <<-YAML
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: inflate
+    spec:
+      replicas: 10
+      selector:
+        matchLabels:
+          app: inflate
+      template:
+        metadata:
+          labels:
+            app: inflate
+        spec:
+          terminationGracePeriodSeconds: 0
+          containers:
+            - name: inflate
+              image: public.ecr.aws/eks-distro/kubernetes/pause:3.7
+              resources:
+                requests:
+                  cpu: 1
+  YAML
 
-#   depends_on = [
-#     helm_release.karpenter
-#   ]
-# }
+  depends_on = [
+    helm_release.karpenter
+  ]
+}
