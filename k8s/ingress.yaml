@@ -8,7 +8,7 @@ spec:
   ingressClassName: nginx
 
   rules:
-      http:
+    - http:
         paths:
           - path: /
             pathType: Prefix
@@ -25,4 +25,10 @@ spec:
                 name: backend-service
                 port:
                   number: 8081
-
+          - path: /health
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-service
+                port:
+                  number: 8081

@@ -467,6 +467,23 @@ resource "helm_release" "ingress-nginx" {
 
 }
 
+
+# resource "helm_release" "ingress-nginx" {
+#   name             = "ingress-nginx"
+#   repository       = "oci://ghcr.io/nginx/charts/nginx-ingress"
+#   chart            = "ingress-nginx"
+#   namespace        = "ingress-nginx"
+#   create_namespace = true
+#   version          = "2.6.0"
+#   values           = [file("../../k8s/helm-nginx-cofiguration.yaml")]
+
+#   depends_on = [helm_release.aws_load_balancer_controller]
+
+
+
+# }
+
+
 resource "kubectl_manifest" "karpenter_node_pool" {
   yaml_body = <<-YAML
     apiVersion: karpenter.sh/v1
@@ -499,6 +516,7 @@ resource "kubectl_manifest" "karpenter_node_pool" {
             - key: "karpenter.k8s.aws/instance-category"
               operator: In
               values: ["t"]
+
 
             # ------------------------------------------------------------------
             # INSTANCE CPU FILTER
@@ -534,6 +552,10 @@ resource "kubectl_manifest" "karpenter_node_pool" {
             - key: "karpenter.k8s.aws/instance-generation"
               operator: Gte
               values: ["2"]
+
+            - key: kubernetes.io/arch
+              operator: In
+              values: ["amd64"]
 
       # ----------------------------------------------------------------------
       # NODE CAPACITY LIMIT

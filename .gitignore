@@ -22,5 +22,6 @@ terraform.tfvars
 k8s/secret.yaml
 github-secrets.txt
 github-variables.txt
+backend-secret.yaml
 
 
