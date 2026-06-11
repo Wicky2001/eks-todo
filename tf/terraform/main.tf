@@ -226,6 +226,7 @@ module "eks" {
         }
       })
     }
+
   }
 
   vpc_id                   = module.vpc.vpc_id
@@ -240,7 +241,7 @@ module "eks" {
 
       min_size     = 2
       max_size     = 10
-      desired_size = 2
+      desired_size = 3
 
       taints = {
         # This Taint aims to keep just EKS Addons and Karpenter running on this MNG
@@ -349,7 +350,7 @@ resource "helm_release" "karpenter" {
 
 
 ###############################################################################
-# Install Metrics Server via Raw Helm
+# Install Metrics Server Addon via helm
 ###############################################################################
 resource "helm_release" "metrics_server" {
   name       = "metrics-server"
@@ -375,6 +376,95 @@ resource "helm_release" "metrics_server" {
       - --kubelet-insecure-tls
     EOT
   ]
+}
+
+
+module "iam_iam-role-for-service-accounts" {
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts"
+  version = "6.6.1"
+
+  # Updated to match the v6.x variable list
+  name                                   = "${var.cluster_name}-aws-lbc"
+  attach_load_balancer_controller_policy = true
+
+  oidc_providers = {
+    main = {
+      provider_arn               = module.eks.oidc_provider_arn
+      namespace_service_accounts = ["kube-system:aws-load-balancer-controller"]
+    }
+  }
+}
+
+resource "helm_release" "aws_load_balancer_controller" {
+  name       = "aws-load-balancer-controller"
+  repository = "https://aws.github.io/eks-charts"
+  chart      = "aws-load-balancer-controller"
+  namespace  = "kube-system"
+  version    = "1.7.2"
+
+  depends_on = [module.eks]
+  values = [
+    yamlencode({
+      tolerations = [
+        {
+          key      = "CriticalAddonsOnly"
+          operator = "Exists"
+          effect   = "NoSchedule"
+        }
+      ]
+    })
+  ]
+
+  set = [{
+    name  = "clusterName"
+    value = module.eks.cluster_name
+    },
+    {
+      name  = "region"
+      value = var.region
+    },
+    {
+      name  = "serviceAccount.create"
+      value = "false"
+    },
+    {
+      name  = "vpcId"
+      value = module.vpc.vpc_id
+    },
+    {
+      name  = "serviceAccount.create"
+      value = "true"
+    },
+    {
+      name  = "serviceAccount.name"
+      value = "aws-load-balancer-controller"
+    },
+    {
+      name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
+      value = module.iam_iam-role-for-service-accounts.arn
+  }]
+
+
+
+}
+
+###############################################################################
+# Install nginx ingress controller via helm, using a custom values.yaml file for configuration
+###############################################################################
+
+resource "helm_release" "ingress-nginx" {
+  name             = "ingress-nginx"
+  repository       = "https://kubernetes.github.io/ingress-nginx"
+  chart            = "ingress-nginx"
+  namespace        = "ingress-nginx"
+  create_namespace = true
+  version          = "4.15.1"
+  values           = [file("../../k8s/helm-nginx-cofiguration.yaml")]
+
+  depends_on = [helm_release.aws_load_balancer_controller]
+
+
+
 }
 
 resource "kubectl_manifest" "karpenter_node_pool" {
@@ -604,5 +694,8 @@ resource "aws_security_group" "backend_pod_sg" {
 #           - ${aws_security_group.backend_pod_sg.id}
 #   YAML
 # }
+
+
+
 
 
