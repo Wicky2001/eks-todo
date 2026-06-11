@@ -561,29 +561,6 @@ resource "aws_ecr_repository" "migration" {
 }
 
 
-###############################################################################
-# DocumentDB Cluster Configuration
-###############################################################################
-module "documentdb_cluster" {
-  source  = "cloudposse/documentdb-cluster/aws"
-  version = "1.1.0" # Pinning to a stable version
-
-  namespace        = "eks-todo"
-  stage            = "testing"
-  name             = "eks-todo-docdb"
-  cluster_size     = 1
-  master_username  = var.master_username
-  master_password  = var.master_password
-  instance_class   = "db.t3.medium"
-  vpc_id           = module.vpc.vpc_id
-  subnet_ids       = module.vpc.private_subnets
-  retention_period = 0
-
-
-
-  allowed_security_groups = [aws_security_group.backend_pod_sg.id]
-
-}
 
 
 ###############################################################################
@@ -611,21 +588,21 @@ resource "aws_security_group" "backend_pod_sg" {
 ###############################################################################
 # 3. Tell Kubernetes to dynamically apply this SG whenever our backend spins up
 ###############################################################################
-resource "kubectl_manifest" "backend_network_policy" {
-  yaml_body = <<-YAML
-    apiVersion: vpcresources.k8s.aws/v1beta1
-    kind: SecurityGroupPolicy
-    metadata:
-      name: backend-db-access
-      namespace: default
-    spec:
-      podSelector:
-        matchLabels:
-          app: backend
-      securityGroups:
-        groupIds:
-          - ${aws_security_group.backend_pod_sg.id}
-  YAML
-}
+# resource "kubectl_manifest" "backend_network_policy" {
+#   yaml_body = <<-YAML
+#     apiVersion: vpcresources.k8s.aws/v1beta1
+#     kind: SecurityGroupPolicy
+#     metadata:
+#       name: backend-db-access
+#       namespace: default
+#     spec:
+#       podSelector:
+#         matchLabels:
+#           app: backend
+#       securityGroups:
+#         groupIds:
+#           - ${aws_security_group.backend_pod_sg.id}
+#   YAML
+# }
 
 
