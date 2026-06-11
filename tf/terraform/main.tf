@@ -568,15 +568,16 @@ module "documentdb_cluster" {
   source  = "cloudposse/documentdb-cluster/aws"
   version = "1.1.0" # Pinning to a stable version
 
-  namespace       = "eks-todo"
-  stage           = "testing"
-  name            = "eks-todo-docdb"
-  cluster_size    = 1
-  master_username = var.master_username
-  master_password = var.master_password
-  instance_class  = "db.t3.medium"
-  vpc_id          = module.vpc.vpc_id
-  subnet_ids      = module.vpc.private_subnets
+  namespace        = "eks-todo"
+  stage            = "testing"
+  name             = "eks-todo-docdb"
+  cluster_size     = 1
+  master_username  = var.master_username
+  master_password  = var.master_password
+  instance_class   = "db.t3.medium"
+  vpc_id           = module.vpc.vpc_id
+  subnet_ids       = module.vpc.private_subnets
+  retention_period = 0
 
 
 
@@ -603,23 +604,6 @@ resource "aws_security_group" "backend_pod_sg" {
   tags = {
     Name = "${var.cluster_name}-backend-pod-sg"
   }
-}
-
-
-
-
-
-
-###############################################################################
-# 2. Allow the Backend Pod SG to talk to the DocumentDB SG
-###############################################################################
-resource "aws_security_group_rule" "allow_backend_to_docdb" {
-  type                     = "ingress"
-  from_port                = 27017 # Default DocumentDB MongoDB port
-  to_port                  = 27017
-  protocol                 = "tcp"
-  source_security_group_id = aws_security_group.backend_pod_sg.id
-  security_group_id        = module.documentdb_cluster.security_group_id
 }
 
 
